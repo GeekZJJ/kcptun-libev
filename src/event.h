@@ -34,6 +34,11 @@ int kcp_output(const char *buf, int len, struct IKCPCB *kcp, void *user);
 bool kcp_sendmsg(struct session *ss, uint16_t msg);
 bool kcp_push(struct session *ss);
 void kcp_recv(struct session *ss);
+bool kcp_send(struct session *restrict ss, const unsigned char *buf, const size_t len);
+
+void client_udp_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);
+void server_udp_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);
+void udp_session_timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents);
 
 void tcp_flush(struct session *ss);
 void tcp_notify(struct session *ss);

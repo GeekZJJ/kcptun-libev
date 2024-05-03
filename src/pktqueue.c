@@ -110,7 +110,7 @@ static void queue_recv(struct server *restrict s, struct msgframe *restrict msg)
 		session0(s, msg);
 		return;
 	}
-
+	bool udp = conv > UINT16_MAX;
 	const struct sockaddr *sa = &msg->addr.sa;
 	unsigned char sskey[SESSION_KEY_SIZE];
 	SESSION_MAKEKEY(sskey, sa, conv);
@@ -130,13 +130,22 @@ static void queue_recv(struct server *restrict s, struct msgframe *restrict msg)
 			ss0_reset(s, sa, conv);
 			return;
 		}
-		/* accept new kcp session */
-		ss = session_new(s, &msg->addr, conv);
-		if (ss == NULL) {
-			LOGE("out of memory");
-			return;
+		if (udp) {
+			/* accept new kcp session */
+			ss = session_new_udp(s, &msg->addr, conv);
+			if (ss == NULL) {
+				LOGE("out of memory");
+				return;
+			}
+		} else {
+			/* accept new kcp session */
+			ss = session_new(s, &msg->addr, conv);
+			if (ss == NULL) {
+				LOGE("out of memory");
+				return;
+			}
+			ss->is_accepted = true;
 		}
-		ss->is_accepted = true;
 		void *elem = ss;
 		s->sessions = table_set(s->sessions, SESSION_GETKEY(ss), &elem);
 		assert(elem == NULL);
@@ -147,6 +156,11 @@ static void queue_recv(struct server *restrict s, struct msgframe *restrict msg)
 			      conv, addr_str);
 		}
 		ss->kcp_state = STATE_CONNECT;
+	}
+
+	if (udp) {
+		ev_timer_again(s->loop, & ss->w_udp_timeout);
+		LOGV_F("session [%08" PRIX32 "] udp timer reset", ss->conv);
 	}
 
 	const ev_tstamp now = ev_now(s->loop);

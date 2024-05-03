@@ -18,9 +18,11 @@
 
 struct listener {
 	struct ev_io w_accept;
+	struct ev_io w_accept_udp;
 	struct ev_io w_accept_http;
 	struct ev_timer w_timer;
 	int fd;
+	int fd_udp;
 	int fd_http;
 };
 
@@ -57,7 +59,9 @@ struct server {
 	struct listener listener;
 	struct pktconn pkt;
 	uint32_t m_conv;
+	uint32_t m_conv_udp;
 	struct hashtable *sessions;
+	struct hashtable *sessions_udp;
 	struct {
 		union sockaddr_max connect;
 
@@ -93,6 +97,7 @@ void udp_rendezvous(struct server *s, uint16_t what);
 void server_stop(struct server *s);
 void server_free(struct server *s);
 
+uint32_t conv_new_udp(struct server *s, const struct sockaddr *sa);
 uint32_t conv_new(struct server *s, const struct sockaddr *sa);
 size_t udp_overhead(const struct pktconn *udp);
 

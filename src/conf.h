@@ -45,6 +45,8 @@ struct config {
 	char *obfs;
 #endif
 
+	int udp_session_timeout;
+
 	int timeout, linger, keepalive, time_wait;
 	int log_level;
 	char *user;

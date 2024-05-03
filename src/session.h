@@ -70,6 +70,7 @@ struct IKCPCB;
 
 #define SESSION_BUF_SIZE 16384
 #define SESSION_KEY_SIZE (sizeof(uint32_t) + sizeof(union sockaddr_max))
+#define SESSION_UDP_KEY_SIZE (sizeof(union sockaddr_max))
 
 struct session {
 	unsigned char key[SESSION_KEY_SIZE];
@@ -94,6 +95,11 @@ struct session {
 	struct vbuffer *rbuf, *wbuf;
 	size_t wbuf_flush, wbuf_next;
 
+	bool is_udp;
+	ev_timer w_udp_timeout;
+	union sockaddr_max craddr;
+	unsigned char udpkey[SESSION_UDP_KEY_SIZE];
+
 	struct link_stats stats;
 };
 
@@ -114,6 +120,25 @@ struct session {
 		p += n, size -= n;                                             \
 		memset(p, 0, size);                                            \
 	} while (0)
+
+#define SESSION_UDP_GETKEY(ss)                                                     \
+	((struct hashkey){                                                     \
+		.len = SESSION_UDP_KEY_SIZE,                                       \
+		.data = (ss)->udpkey,                                             \
+	})
+
+#define SESSION_UDP_MAKEKEY(key, sa)                                         \
+	do {                                                                   \
+		unsigned char *p = (key);                                      \
+		size_t size = SESSION_UDP_KEY_SIZE;                                \
+		const size_t n = getsocklen(sa);                               \
+		memcpy(p, (sa), n);                                            \
+		p += n, size -= n;                                             \
+		memset(p, 0, size);                                            \
+	} while (0)
+
+struct session *
+session_new_udp(struct server *s, const union sockaddr_max *addr, uint32_t conv);
 
 struct session *
 session_new(struct server *s, const union sockaddr_max *addr, uint32_t conv);

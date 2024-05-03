@@ -72,6 +72,34 @@ tcp_listen(const struct config *restrict conf, const struct sockaddr *sa)
 	return fd;
 }
 
+static int
+udp_listen(const struct config *restrict conf, const struct sockaddr *sa)
+{
+	/* Create server socket */
+	const int fd = socket(sa->sa_family, SOCK_DGRAM, 0);
+	if (fd < 0) {
+		const int err = errno;
+		LOGE_F("socket: %s", strerror(err));
+		return -1;
+	}
+	if (!socket_set_nonblock(fd)) {
+		const int err = errno;
+		LOGE_F("fcntl: %s", strerror(err));
+		CLOSE_FD(fd);
+		return -1;
+	}
+	socket_set_reuseport(fd, conf->udp_reuseport);
+	socket_set_buffer(fd, conf->udp_sndbuf, conf->udp_rcvbuf);
+	/* Bind socket to address */
+	if (bind(fd, sa, getsocklen(sa)) != 0) {
+		const int err = errno;
+		LOGE_F("tcp bind: %s", strerror(err));
+		CLOSE_FD(fd);
+		return -1;
+	}
+	return fd;
+}
+
 static bool listener_start(struct server *restrict s)
 {
 	const struct config *restrict conf = s->conf;
@@ -97,6 +125,22 @@ static bool listener_start(struct server *restrict s)
 			char addr_str[64];
 			format_sa(&addr.sa, addr_str, sizeof(addr_str));
 			LOG_F(NOTICE, "tcp listen: %s", addr_str);
+		}
+		const int fd_udp = udp_listen(conf, &addr.sa);
+		if (fd_udp == -1) {
+			return false;
+		}
+		/* Initialize and start a watcher to accepts client requests */
+		struct ev_io *restrict w_accept_udp = &l->w_accept_udp;
+		ev_io_init(w_accept_udp, client_udp_cb, fd_udp, EV_READ);
+		ev_set_priority(w_accept_udp, EV_MINPRI);
+		w_accept_udp->data = s;
+		ev_io_start(s->loop, w_accept_udp);
+		l->fd_udp = fd_udp;
+		if (LOGLEVEL(NOTICE)) {
+			char addr_str[64];
+			format_sa(&addr.sa, addr_str, sizeof(addr_str));
+			LOG_F(NOTICE, "udp listen: %s", addr_str);
 		}
 	}
 
@@ -380,7 +424,7 @@ struct server *server_new(struct ev_loop *loop, struct config *restrict conf)
 		.loop = loop,
 		.conf = conf,
 		.m_conv = (uint32_t)rand64(),
-		.listener = (struct listener){ .fd = -1 },
+		.listener = (struct listener){ .fd = -1, .fd_udp = -1 },
 		.pkt =
 			(struct pktconn){
 				.fd = -1,
@@ -439,6 +483,12 @@ struct server *server_new(struct ev_loop *loop, struct config *restrict conf)
 	} else if ((conf->mode & MODE_CLIENT) != 0) {
 		s->sessions = table_new(TABLE_DEFAULT);
 		if (s->sessions == NULL) {
+			LOGOOM();
+			server_free(s);
+			return NULL;
+		}
+		s->sessions_udp = table_new(TABLE_DEFAULT);
+		if (s->sessions_udp == NULL) {
 			LOGOOM();
 			server_free(s);
 			return NULL;
@@ -588,17 +638,35 @@ void server_free(struct server *restrict s)
 		table_free(s->sessions);
 		s->sessions = NULL;
 	}
+	if (s->sessions_udp != NULL) {
+		table_free(s->sessions_udp);
+		s->sessions_udp = NULL;
+	}
 	free(s);
 }
 
-static uint32_t conv_next(uint32_t conv)
+static uint32_t conv_next(uint32_t _conv)
 {
+	uint16_t conv = _conv;
 	conv++;
 	/* 0 is reserved */
 	if (conv == UINT32_C(0)) {
 		conv++;
 	}
-	return conv;
+	return (uint32_t)conv;
+}
+
+static uint32_t conv_next_udp(uint32_t _conv)
+{
+	uint16_t conv = (_conv>>16)&UINT16_MAX;
+	conv++;
+	/* 0 is reserved */
+	if (conv == UINT32_C(0)) {
+		conv++;
+	}
+	_conv = conv;
+	_conv <<= 16;
+	return _conv;
 }
 
 uint32_t conv_new(struct server *restrict s, const struct sockaddr *sa)
@@ -622,6 +690,30 @@ uint32_t conv_new(struct server *restrict s, const struct sockaddr *sa)
 		} while (table_find(s->sessions, hkey, NULL));
 	}
 	s->m_conv = conv;
+	return conv;
+}
+
+uint32_t conv_new_udp(struct server *restrict s, const struct sockaddr *sa)
+{
+	uint32_t conv = conv_next_udp(s->m_conv_udp);
+	unsigned char key[SESSION_KEY_SIZE];
+	const struct hashkey hkey = {
+		.len = sizeof(key),
+		.data = key,
+	};
+	SESSION_MAKEKEY(key, sa, conv);
+	if (table_find(s->sessions, hkey, NULL)) {
+		const double usage =
+			(double)table_size(s->sessions) / (double)UINT32_MAX;
+		do {
+			if (usage < 1e-3) {
+				conv = (uint32_t)rand64();
+			}
+			conv = conv_next_udp(conv);
+			SESSION_MAKEKEY(key, sa, conv);
+		} while (table_find(s->sessions, hkey, NULL));
+	}
+	s->m_conv_udp = conv;
 	return conv;
 }
 

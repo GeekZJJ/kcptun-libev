@@ -169,6 +169,45 @@ static bool session_on_msg(
 }
 
 /* returns: OK=0, wait=1, error=-1 */
+static int ss_process_udp(struct session *restrict ss)
+{
+	size_t nrecv = 0;
+	while (true) {
+		unsigned char buf[2000] = {0};
+		int r = ikcp_recv(ss->kcp, (char *)buf, sizeof(buf));
+		if (r <= 0) {
+			break;
+		}
+		const int fd = (ss->server->conf->mode & MODE_SERVER) ? ss->w_socket.fd : ss->server->listener.fd_udp;
+		struct sockaddr *addr = (ss->server->conf->mode & MODE_SERVER) ? &ss->server->connect.sa : &ss->craddr.sa;
+		const ssize_t ret = sendto(fd, buf, r, 0, addr, getsocklen(addr));
+		char addr_str[64];
+		format_sa(addr, addr_str, sizeof(addr_str));
+		LOGE_F("session [%08" PRIX32 "] udp sendto %s: %d", ss->conv, addr_str, ret);
+		if (ret < 0) {
+			const int err = errno;
+			if (IS_TRANSIENT_ERROR(err)) {
+				continue;
+			}
+			LOGE_F("session [%08" PRIX32 "] udp send: %s", ss->conv, strerror(err));
+			continue;
+		}
+		if (ret == 0) {
+			continue;
+		}
+		nrecv++;
+	}
+	if (nrecv > 0) {
+		ss->last_recv = ev_now(ss->server->loop);
+		LOGV_F("session [%08" PRIX32 "] kcp: "
+		       "recv %zu pkts",
+		       ss->conv, nrecv);
+	}
+	return 0;
+}
+
+
+/* returns: OK=0, wait=1, error=-1 */
 static int ss_process(struct session *restrict ss)
 {
 	if (ss->wbuf_flush < ss->wbuf_next) {
@@ -268,11 +307,12 @@ void session_tcp_stop(struct session *restrict ss)
 	if (w_socket->fd == -1) {
 		return;
 	}
-	LOGD_F("session [%08" PRIX32 "] tcp: stop, fd=%d", ss->conv,
-	       w_socket->fd);
-	ev_io_stop(ss->server->loop, w_socket);
-	CLOSE_FD(ss->w_socket.fd);
-	ev_io_set(w_socket, -1, EV_NONE);
+	LOGD_F("session [%08" PRIX32 "] %s: stop, fd=%d", ss->conv, ss->is_udp ? "udp" : "tcp", w_socket->fd);
+	if (ss->w_socket.fd) {
+		ev_io_stop(ss->server->loop, w_socket);
+		CLOSE_FD(ss->w_socket.fd);
+		ev_io_set(w_socket, -1, EV_NONE);
+	}
 }
 
 void session_kcp_stop(struct session *restrict ss)
@@ -282,8 +322,10 @@ void session_kcp_stop(struct session *restrict ss)
 		ikcp_release(ss->kcp);
 		ss->kcp = NULL;
 	}
-	ss->rbuf = VBUF_FREE(ss->rbuf);
-	ss->wbuf = VBUF_FREE(ss->wbuf);
+	if (!ss->is_udp) {
+		ss->rbuf = VBUF_FREE(ss->rbuf);
+		ss->wbuf = VBUF_FREE(ss->wbuf);
+	}
 }
 
 void session_tcp_start(struct session *restrict ss, const int fd)
@@ -308,6 +350,10 @@ void session_free(struct session *restrict ss)
 void session_read_cb(struct session *restrict ss)
 {
 	int ret = 0;
+	if (ss->is_udp) {
+		ss_process_udp(ss);
+		return;
+	}
 	while (ss->kcp_state == STATE_CONNECTED && ret == 0) {
 		ret = ss_process(ss);
 	}
@@ -378,6 +424,70 @@ struct session *session_new(
 		session_free(ss);
 		return NULL;
 	}
+	return ss;
+}
+
+struct session *session_new_udp(
+	struct server *restrict s, const union sockaddr_max *addr,
+	const uint32_t conv)
+{
+	struct session *restrict ss =
+		(struct session *)malloc(sizeof(struct session));
+	if (ss == NULL) {
+		return NULL;
+	}
+	const ev_tstamp now = ev_now(s->loop);
+	*ss = (struct session){
+		.server = s,
+		.kcp_flush = s->conf->kcp_flush,
+		.conv = conv,
+		.is_udp = true,
+		.raddr = *addr,
+		.created = now,
+		.last_reset = TSTAMP_NIL,
+		.last_send = TSTAMP_NIL,
+		.last_recv = TSTAMP_NIL,
+	};
+	SESSION_MAKEKEY(ss->key, &addr->sa, conv);
+	ss->kcp = kcp_new(ss, s->conf, conv);
+	if (ss->kcp == NULL) {
+		session_free(ss);
+		return NULL;
+	}
+	ss->kcp->stream = 0;
+
+	if ((s->conf->mode & MODE_SERVER) != 0) {
+		/* Create client socket */
+		int fd = socket(addr->sa.sa_family, SOCK_DGRAM, 0);
+		if (fd < 0) {
+			const int err = errno;
+			LOGE_F("socket: %s", strerror(err));
+			return false;
+		}
+		if (!socket_set_nonblock(fd)) {
+			const int err = errno;
+			LOGE_F("fcntl: %s", strerror(err));
+			CLOSE_FD(fd);
+			return false;
+		}
+		socket_set_buffer(fd, s->conf->udp_sndbuf, s->conf->udp_rcvbuf);
+
+		LOGD_F("session [%08" PRIX32 "] udp: start, fd=%d", ss->conv, fd);
+		/* Initialize and start watchers to transfer data */
+		struct ev_loop *loop = ss->server->loop;
+		struct ev_io *restrict w_socket = &ss->w_socket;
+		ev_io_init(w_socket, server_udp_cb, fd, EV_READ);
+		ev_set_priority(w_socket, EV_MINPRI);
+		ss->w_socket.data = ss;
+		ev_io_start(loop, w_socket);
+	}
+
+	struct ev_loop *loop = ss->server->loop;
+	const double timeout = s->conf->udp_session_timeout;
+	ev_timer_init(&ss->w_udp_timeout, udp_session_timeout_cb, timeout, timeout);
+	ss->w_udp_timeout.data = ss;
+	ev_timer_start(loop, &ss->w_udp_timeout);
+
 	return ss;
 }
 
@@ -591,7 +701,7 @@ ss0_on_reset(struct server *restrict s, struct msgframe *restrict msg)
 		return true;
 	}
 	LOGI_F("session [%08" PRIX32 "] kcp: reset by peer", conv);
-	session_tcp_stop(ss);
+	if (!ss->is_udp) session_tcp_stop(ss);
 	session_kcp_stop(ss);
 	return true;
 }

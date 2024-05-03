@@ -138,6 +138,9 @@ udp_scope_cb(void *ud, const char *key, const struct jutil_value *value)
 	if (strcmp(key, "rcvbuf") == 0) {
 		return jutil_get_int(value, &conf->udp_rcvbuf);
 	}
+	if (strcmp(key, "session_timeout") == 0) {
+		return jutil_get_int(value, &conf->udp_session_timeout);
+	}
 	LOGW_F("unknown config: \"udp.%s\"", key);
 	return true;
 }
@@ -251,6 +254,7 @@ static struct config conf_default(void)
 		.kcp_nc = 1,
 		.kcp_flush = 1,
 		.timeout = 600,
+		.udp_session_timeout = 10,
 		.linger = 30,
 		.keepalive = 25,
 		.time_wait = 120,
@@ -332,6 +336,7 @@ static bool conf_check(struct config *restrict conf)
 		RANGE_CHECK("kcp.resend", conf->kcp_resend, 0, 100) &&
 		RANGE_CHECK("kcp.nc", conf->kcp_nc, 0, 1) &&
 		RANGE_CHECK("kcp.flush", conf->kcp_flush, 0, 2) &&
+		RANGE_CHECK("udp.session_timeout", conf->udp_session_timeout, 5, 60) &&
 		RANGE_CHECK("timeout", conf->timeout, 60, 86400) &&
 		RANGE_CHECK("linger", conf->linger, 5, 600) &&
 		RANGE_CHECK("keepalive", conf->keepalive, 0, 600) &&
