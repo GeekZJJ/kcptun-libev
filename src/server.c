@@ -335,7 +335,7 @@ size_t udp_overhead(const struct pktconn *restrict udp)
 /* calculate max send size */
 static size_t server_mss(const struct server *restrict s)
 {
-	size_t mss = (size_t)s->conf->kcp_mtu;
+	size_t mss = (size_t)s->conf->kcp_mtu - 2;
 	const struct pktqueue *restrict q = s->pkt.queue;
 	UNUSED(q);
 #if WITH_OBFS

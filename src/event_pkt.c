@@ -63,6 +63,16 @@ static struct mmsghdr mmsgs[MMSG_BATCH_SIZE];
 
 #if HAVE_RECVMMSG
 
+bool verify_received_msg(struct mmsghdr *mmsghdr) {
+	size_t len = mmsghdr->msg_len, to_verify_len;
+	unsigned char* buf = mmsghdr->msg_hdr.msg_iov->iov_base;
+	if (len < 2) {
+		return false;
+	}
+	to_verify_len = ((((size_t)buf[len-2])<<8) | ((size_t)buf[len-1]));
+	return to_verify_len == len;
+}
+
 static size_t pkt_recv(struct server *restrict s, const int fd)
 {
 	struct pktqueue *restrict q = s->pkt.queue;
@@ -118,8 +128,15 @@ static size_t pkt_recv(struct server *restrict s, const int fd)
 			break;
 		}
 		const size_t n = (size_t)ret;
+		size_t skip = 0;
 		for (size_t i = 0; i < n; i++) {
 			struct msgframe *restrict msg = frames[i];
+			if (!verify_received_msg(mmsgs+i)) {
+				msgframe_delete(q, frames[i]);
+				skip++;
+				continue;
+			}
+			mmsgs[i].msg_len -= 2;
 			const size_t len = (size_t)mmsgs[i].msg_len;
 			msg->len = len;
 			msg->ts = now;
@@ -131,14 +148,25 @@ static size_t pkt_recv(struct server *restrict s, const int fd)
 		for (size_t i = n; i < nbatch; i++) {
 			msgframe_delete(q, frames[i]);
 		}
-		nrecv += n;
-		navail -= n;
+		if (skip > 0) LOGE_F("drop %d malformed pkts", skip);
+		nrecv += (n - skip);
+		navail -= (n - skip);
 	} while (navail > 0);
 	s->stats.pkt_rx += nbrecv;
 	return nrecv;
 }
 
 #else /* HAVE_RECVMMSG */
+
+bool verify_received_msg(struct msghdr *msghdr, size_t len) {
+	size_t to_verify_len;
+	unsigned char* buf = msghdr->msg_iov->iov_base;
+	if (len < 2) {
+		return false;
+	}
+	to_verify_len = ((((size_t)buf[len-2])<<8) | ((size_t)buf[len-1]));
+	return to_verify_len == len;
+}
 
 static size_t pkt_recv(struct server *restrict s, const int fd)
 {
@@ -158,7 +186,7 @@ static size_t pkt_recv(struct server *restrict s, const int fd)
 		}
 		struct iovec iov = RECVMSG_IOV(msg);
 		struct msghdr hdr = RECVMSG_HDR(msg, &iov);
-		const ssize_t nbrecv = recvmsg(fd, &hdr, 0);
+		ssize_t nbrecv = recvmsg(fd, &hdr, 0);
 		if (nbrecv < 0) {
 			const int err = errno;
 			msgframe_delete(q, msg);
@@ -172,6 +200,12 @@ static size_t pkt_recv(struct server *restrict s, const int fd)
 			LOGE_F("recvmsg: %s", strerror(err));
 			break;
 		}
+		if (!verify_received_msg(&hdr, nbrecv)) {
+			msgframe_delete(q, msg);
+			LOGE("drop 1 malformed pkt");
+			continue;
+		}
+		nbrecv -= 2;
 		msg->len = (size_t)nbrecv;
 		msg->ts = now;
 		q->mq_recv[q->mq_recv_len++] = msg;
@@ -239,6 +273,9 @@ static size_t pkt_send(struct server *restrict s, const int fd)
 		nbatch = MIN(navail, MMSG_BATCH_SIZE);
 		for (size_t i = 0; i < nbatch; i++) {
 			struct msgframe *restrict msg = q->mq_send[nsend + i];
+			msg->len += 2;
+			msg->buf[msg->len-2] = (msg->len >> 8) & 0xff;
+			msg->buf[msg->len-1] = msg->len & 0xff;
 			iovecs[i] = SENDMSG_IOV(msg);
 			mmsgs[i] = (struct mmsghdr){
 				.msg_hdr = SENDMSG_HDR(msg, &iovecs[i]),
@@ -298,6 +335,9 @@ static size_t pkt_send(struct server *restrict s, const int fd)
 	size_t nsend = 0, nbsend = 0;
 	for (size_t i = 0; i < count; i++) {
 		struct msgframe *restrict msg = q->mq_send[i];
+		msg->len += 2;
+		msg->buf[msg->len-2] = (msg->len >> 8) & 0xff;
+		msg->buf[msg->len-1] = msg->len & 0xff;
 		struct iovec iov = SENDMSG_IOV(msg);
 		struct msghdr hdr = SENDMSG_HDR(msg, &iov);
 		const ssize_t ret = sendmsg(fd, &hdr, 0);
