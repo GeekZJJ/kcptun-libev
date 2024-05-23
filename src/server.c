@@ -423,7 +423,8 @@ struct server *server_new(struct ev_loop *loop, struct config *restrict conf)
 	*s = (struct server){
 		.loop = loop,
 		.conf = conf,
-		.m_conv = (uint32_t)rand64(),
+		.m_conv = (uint32_t)rand64()&0xffff,
+		.m_conv_udp = (uint32_t)rand64()&0xffff0000,
 		.listener = (struct listener){ .fd = -1, .fd_udp = -1 },
 		.pkt =
 			(struct pktconn){
@@ -480,6 +481,7 @@ struct server *server_new(struct ev_loop *loop, struct config *restrict conf)
 			server_free(s);
 			return NULL;
 		}
+		s->sessions_udp = NULL;
 	} else if ((conf->mode & MODE_CLIENT) != 0) {
 		s->sessions = table_new(TABLE_DEFAULT);
 		if (s->sessions == NULL) {

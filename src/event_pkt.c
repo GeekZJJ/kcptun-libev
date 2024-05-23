@@ -69,8 +69,8 @@ bool verify_received_msg(struct mmsghdr *mmsghdr) {
 	if (len < 2) {
 		return false;
 	}
-	to_verify_len = ((((size_t)buf[len-2])<<8) | ((size_t)buf[len-1]));
-	return to_verify_len == len;
+	to_verify_len = ((((size_t)buf[len - 2])<<8) | ((size_t)buf[len - 1]));
+	return to_verify_len == (len - 2);
 }
 
 static size_t pkt_recv(struct server *restrict s, const int fd)
@@ -164,8 +164,8 @@ bool verify_received_msg(struct msghdr *msghdr, size_t len) {
 	if (len < 2) {
 		return false;
 	}
-	to_verify_len = ((((size_t)buf[len-2])<<8) | ((size_t)buf[len-1]));
-	return to_verify_len == len;
+	to_verify_len = ((((size_t)buf[len - 2])<<8) | ((size_t)buf[len-1]));
+	return to_verify_len == (len - 2);
 }
 
 static size_t pkt_recv(struct server *restrict s, const int fd)
@@ -240,10 +240,10 @@ static size_t pkt_send_drop(struct pktqueue *restrict q)
 	return count;
 }
 
-#define SENDMSG_IOV(msg)                                                       \
+#define SENDMSG_IOV(msg, extra)                                                \
 	((struct iovec){                                                       \
 		.iov_base = (msg)->buf,                                        \
-		.iov_len = (msg)->len,                                         \
+		.iov_len = (msg)->len + extra,                                 \
 	})
 
 #define SENDMSG_HDR(msg, iov)                                                  \
@@ -273,13 +273,12 @@ static size_t pkt_send(struct server *restrict s, const int fd)
 		nbatch = MIN(navail, MMSG_BATCH_SIZE);
 		for (size_t i = 0; i < nbatch; i++) {
 			struct msgframe *restrict msg = q->mq_send[nsend + i];
-			msg->len += 2;
-			msg->buf[msg->len-2] = (msg->len >> 8) & 0xff;
-			msg->buf[msg->len-1] = msg->len & 0xff;
-			iovecs[i] = SENDMSG_IOV(msg);
+			msg->buf[msg->len] = (msg->len >> 8) & 0xff;
+			msg->buf[msg->len + 1] = msg->len & 0xff;
+			iovecs[i] = SENDMSG_IOV(msg, 2);
 			mmsgs[i] = (struct mmsghdr){
 				.msg_hdr = SENDMSG_HDR(msg, &iovecs[i]),
-				.msg_len = msg->len,
+				.msg_len = iovecs[i].iov_len,
 			};
 		}
 
@@ -335,10 +334,9 @@ static size_t pkt_send(struct server *restrict s, const int fd)
 	size_t nsend = 0, nbsend = 0;
 	for (size_t i = 0; i < count; i++) {
 		struct msgframe *restrict msg = q->mq_send[i];
-		msg->len += 2;
-		msg->buf[msg->len-2] = (msg->len >> 8) & 0xff;
-		msg->buf[msg->len-1] = msg->len & 0xff;
-		struct iovec iov = SENDMSG_IOV(msg);
+		msg->buf[msg->len] = (msg->len >> 8) & 0xff;
+		msg->buf[msg->len + 1] = msg->len & 0xff;
+		struct iovec iov = SENDMSG_IOV(msg, 2);
 		struct msghdr hdr = SENDMSG_HDR(msg, &iov);
 		const ssize_t ret = sendmsg(fd, &hdr, 0);
 		if (ret < 0) {

@@ -183,7 +183,6 @@ static int ss_process_udp(struct session *restrict ss)
 		const ssize_t ret = sendto(fd, buf, r, 0, addr, getsocklen(addr));
 		char addr_str[64];
 		format_sa(addr, addr_str, sizeof(addr_str));
-		LOGE_F("session [%08" PRIX32 "] udp sendto %s: %d", ss->conv, addr_str, ret);
 		if (ret < 0) {
 			const int err = errno;
 			if (IS_TRANSIENT_ERROR(err)) {
@@ -398,6 +397,7 @@ struct session *session_new(
 		.kcp_flush = s->conf->kcp_flush,
 		.conv = conv,
 		.raddr = *addr,
+		.is_udp = false,
 		.created = now,
 		.last_reset = TSTAMP_NIL,
 		.last_send = TSTAMP_NIL,
