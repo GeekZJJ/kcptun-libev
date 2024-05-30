@@ -173,7 +173,7 @@ static int ss_process_udp(struct session *restrict ss)
 {
 	size_t nrecv = 0;
 	while (true) {
-		unsigned char buf[2000] = {0};
+		unsigned char buf[65535] = {0};
 		int r = ikcp_recv(ss->kcp, (char *)buf, sizeof(buf));
 		if (r <= 0) {
 			break;

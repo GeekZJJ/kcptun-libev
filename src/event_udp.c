@@ -78,7 +78,7 @@ void client_udp_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	struct server *restrict s = watcher->data;
 
 	for (;;) {
-		unsigned char buf[2000] = {0};
+		unsigned char buf[65535] = {0};
 		union sockaddr_max addr;
 		socklen_t addrlen = sizeof(addr);
 		const ssize_t nbrecv = recvfrom(watcher->fd, buf, sizeof(buf), 0, &addr.sa, &addrlen);
@@ -105,6 +105,12 @@ void client_udp_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		struct session *restrict ss;
 		if (table_find(s->sessions_udp, hkey, (void **)&ss)) {
 			assert(ss->is_udp);
+			if (!kcp_cansend(ss)) {
+				LOG_RATELIMITED_F(
+					ERROR, ev_now(loop), 1.0,
+					"session [%08" PRIX32 "] kcp can't send, drop 1 pkt (len = %d)", ss->conv, nbrecv);
+				continue;
+			}
 			kcp_send(ss, buf, nbrecv);
 			ev_timer_again(loop, & ss->w_udp_timeout);
 			LOGV_F("session [%08" PRIX32 "] udp timer reset", ss->conv);
@@ -115,7 +121,7 @@ void client_udp_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			LOG_RATELIMITED(
 				ERROR, ev_now(loop), 1.0,
 				"* max session count exceeded, new connections refused");
-			return;
+			continue;
 		}
 
 		ss = accept_one_udp(s, &addr.sa);
@@ -131,7 +137,7 @@ void server_udp_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	struct session *restrict ss = watcher->data;
 
 	for (;;) {
-		uint8_t buf[2000] = {0};
+		uint8_t buf[65535] = {0};
 		union sockaddr_max addr;
 		socklen_t addrlen = sizeof(addr);
 		/* Receive message from client socket */
@@ -142,6 +148,12 @@ void server_udp_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 				break;
 			}
 			LOGE_F("session [%08" PRIX32 "] udp recv: %s", ss->conv, strerror(err));
+			break;
+		}
+		if (!kcp_cansend(ss)) {
+			LOG_RATELIMITED_F(
+				ERROR, ev_now(loop), 1.0,
+				"session [%08" PRIX32 "] kcp can't send, drop 1 pkt (len = %d)", ss->conv, nread);
 			break;
 		}
 		kcp_send(ss, buf, nread);
