@@ -1,0 +1,138 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index a841ee2..6738f50 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -9,7 +9,7 @@ add_executable(kcptun-libev main.c
+     server.c server.h
+     nonce.c nonce.h
+     obfs.c obfs.h
+-    event_tcp.c event_udp.c event_kcp.c event_pkt.c event_http.c event_timer.c event.h)
++    event_tcp.c event_udp.c event_kcp.c event_pkt.c event_timer.c event.h)
+ 
+ if(TARGET_LINUX)
+     target_compile_definitions(kcptun-libev PRIVATE _GNU_SOURCE)
+diff --git a/src/conf.c b/src/conf.c
+index 9692913..12220b5 100644
+--- a/src/conf.c
++++ b/src/conf.c
+@@ -178,10 +178,6 @@ main_scope_cb(void *ud, const char *key, const struct jutil_value *value)
+ 		conf->rendezvous_server = jutil_get_string(value);
+ 		return conf->rendezvous_server != NULL;
+ 	}
+-	if (strcmp(key, "http_listen") == 0) {
+-		conf->http_listen = jutil_get_string(value);
+-		return conf->http_listen != NULL;
+-	}
+ 	if (strcmp(key, "netdev") == 0) {
+ 		conf->netdev = jutil_get_string(value);
+ 		return conf->netdev != NULL;
+@@ -392,7 +388,6 @@ void conf_free(struct config *conf)
+ 	UTIL_SAFE_FREE(conf->kcp_bind);
+ 	UTIL_SAFE_FREE(conf->kcp_connect);
+ 	UTIL_SAFE_FREE(conf->rendezvous_server);
+-	UTIL_SAFE_FREE(conf->http_listen);
+ 	UTIL_SAFE_FREE(conf->netdev);
+ 	UTIL_SAFE_FREE(conf->user);
+ #if WITH_CRYPTO
+diff --git a/src/conf.h b/src/conf.h
+index 79f9849..d13d86c 100644
+--- a/src/conf.h
++++ b/src/conf.h
+@@ -21,7 +21,6 @@ struct config {
+ 	char *kcp_bind;
+ 	char *kcp_connect;
+ 	char *rendezvous_server;
+-	char *http_listen;
+ 	char *netdev;
+ 
+ 	int mode;
+diff --git a/src/event.h b/src/event.h
+index 5c8a439..7cfc97d 100644
+--- a/src/event.h
++++ b/src/event.h
+@@ -25,7 +25,6 @@ void listener_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents);
+ void keepalive_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents);
+ void resolve_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents);
+ void timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents);
+-void http_accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);
+ 
+ bool kcp_cansend(struct session *ss);
+ bool kcp_canrecv(struct session *ss);
+diff --git a/src/event_timer.c b/src/event_timer.c
+index 6ebbd02..ca065e2 100644
+--- a/src/event_timer.c
++++ b/src/event_timer.c
+@@ -89,10 +89,6 @@ void listener_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+ 	if (l->fd != -1 && !ev_is_active(w_accept)) {
+ 		ev_io_start(loop, w_accept);
+ 	}
+-	struct ev_io *restrict w_accept_http = &l->w_accept_http;
+-	if (l->fd_http != -1 && !ev_is_active(w_accept_http)) {
+-		ev_io_start(loop, w_accept_http);
+-	}
+ }
+ 
+ void keepalive_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+diff --git a/src/server.c b/src/server.c
+index 5d71c4e..62784e8 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -144,28 +144,6 @@ static bool listener_start(struct server *restrict s)
+ 		}
+ 	}
+ 
+-	if (conf->http_listen != NULL) {
+-		union sockaddr_max addr;
+-		if (!resolve_addr(&addr, conf->http_listen, RESOLVE_PASSIVE)) {
+-			return false;
+-		}
+-		const int fd = tcp_listen(conf, &addr.sa);
+-		if (fd == -1) {
+-			return false;
+-		}
+-		struct ev_io *restrict w_accept = &l->w_accept_http;
+-		ev_io_init(w_accept, http_accept_cb, fd, EV_READ);
+-		ev_set_priority(w_accept, EV_MINPRI);
+-		w_accept->data = s;
+-		ev_io_start(s->loop, w_accept);
+-		l->fd_http = fd;
+-		if (LOGLEVEL(NOTICE)) {
+-			char addr_str[64];
+-			format_sa(&addr.sa, addr_str, sizeof(addr_str));
+-			LOG_F(NOTICE, "http listen at %s", addr_str);
+-		}
+-	}
+-
+ 	struct ev_timer *restrict w_listener = &s->listener.w_timer;
+ 	ev_timer_init(w_listener, listener_cb, 0.5, 0.0);
+ 	ev_set_priority(w_listener, EV_MINPRI);
+@@ -589,13 +567,6 @@ static void listener_stop(struct ev_loop *loop, struct listener *restrict l)
+ 		CLOSE_FD(l->fd);
+ 		l->fd = -1;
+ 	}
+-	if (l->fd_http != -1) {
+-		LOGD_F("http listener close: fd=%d", l->fd_http);
+-		struct ev_io *restrict w_accept = &l->w_accept;
+-		ev_io_stop(loop, w_accept);
+-		CLOSE_FD(l->fd_http);
+-		l->fd_http = -1;
+-	}
+ 	ev_timer_stop(loop, &l->w_timer);
+ }
+ 
+diff --git a/src/server.h b/src/server.h
+index ec0163b..61a72a3 100644
+--- a/src/server.h
++++ b/src/server.h
+@@ -19,11 +19,9 @@
+ struct listener {
+ 	struct ev_io w_accept;
+ 	struct ev_io w_accept_udp;
+-	struct ev_io w_accept_http;
+ 	struct ev_timer w_timer;
+ 	int fd;
+ 	int fd_udp;
+-	int fd_http;
+ };
+ 
+ struct pktconn {

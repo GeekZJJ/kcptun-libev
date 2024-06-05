@@ -1,0 +1,16 @@
+[Unit]
+Description=kcptun-libev
+Wants=network.target
+After=network-online.target
+
+[Service]
+Type=simple
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+ExecStart=/usr/bin/kcptun-libev -c /etc/kcptun-libev/%i.json
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
