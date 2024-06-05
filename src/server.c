@@ -274,11 +274,6 @@ udp_bind(struct pktconn *restrict udp, const struct config *restrict conf)
 				return false;
 			}
 		}
-		if (connect(udp->fd, &addr.sa, socklen)) {
-			const int err = errno;
-			LOGE_F("udp connect: %s", strerror(err));
-			return false;
-		}
 		memcpy(&udp->kcp_connect.sa, &addr.sa, socklen);
 		if (LOGLEVEL(NOTICE)) {
 			char addr_str[64];
